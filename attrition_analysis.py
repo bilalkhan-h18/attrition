@@ -83,11 +83,11 @@ COL = {
     'tenure'           : 'Tenure_Years',
     'tenure_band'      : 'Tenure_Band',
     'daily_salary'     : 'Daily_Salary',
-    'base_pay'         : 'Total_Base_Pay',
+    'base_pay'         : 'Total_Base_Pay__Amount',   # actual column name in Turnover sheet
     'commute_km'       : 'Commute_Km',
     'commute_band'     : 'Commute_Band',
     'area'             : 'Area',
-    'division'         : 'Division',
+    'division'         : 'Division_57813066',         # actual column name in Turnover sheet
     'business_unit'    : 'Business_Unit',
     'harrods_band'     : 'Harrods_Band',
     'job_profile'      : 'Job_Profile',
