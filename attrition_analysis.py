@@ -92,7 +92,6 @@ COL = {
     'harrods_band'     : 'Harrods_Band',
     'job_profile'      : 'Job_Profile',
     'term_date'        : 'Termination_Date',
-    'month_key'        : 'Monthkey',
 }
 
 # Flexible column-finder (case-insensitive partial match fallback)
@@ -128,10 +127,8 @@ if COL['term_date'] in turnover.columns:
         turnover[COL['term_date']], errors='coerce', dayfirst=True
     )
 
-if COL['month_key'] in turnover.columns:
-    turnover[COL['month_key']] = pd.to_datetime(
-        turnover[COL['month_key']].astype(str), format='%Y%m', errors='coerce'
-    )
+# Derive month from Termination_Date for trend analysis
+turnover['Term_Month'] = turnover[COL['term_date']].dt.to_period('M')
 
 # ── 1.5  Missing-value audit ─────────────────────────────────────────────────
 missing = turnover.isnull().sum()
@@ -195,27 +192,25 @@ for at in autotexts:
     at.set_fontweight('bold')
 axes[0].set_title('Voluntary vs Involuntary Attrition')
 
-# ── 2b  Monthly attrition trend ──────────────────────────────────────────────
-if COL['month_key'] in turnover.columns:
-    monthly = (
-        turnover.groupby([COL['month_key'], COL['category']])
-                .size()
-                .reset_index(name='Count')
-    )
-    monthly_pivot = monthly.pivot(
-        index=COL['month_key'], columns=COL['category'], values='Count'
-    ).fillna(0)
+# ── 2b  Monthly attrition trend (derived from Termination_Date) ──────────────
+monthly = (
+    turnover.groupby(['Term_Month', COL['category']])
+            .size()
+            .reset_index(name='Count')
+)
+monthly['Term_Month'] = monthly['Term_Month'].astype(str)
+monthly_pivot = monthly.pivot(
+    index='Term_Month', columns=COL['category'], values='Count'
+).fillna(0).sort_index()
 
-    monthly_pivot.plot(
-        kind='bar', ax=axes[1], color=PALETTE_2, edgecolor='white', linewidth=0.5
-    )
-    axes[1].set_title('Monthly Attrition Trend')
-    axes[1].set_xlabel('Month')
-    axes[1].set_ylabel('Number of Leavers')
-    axes[1].tick_params(axis='x', rotation=45)
-    axes[1].legend(title='Category', frameon=False)
-else:
-    axes[1].set_visible(False)
+monthly_pivot.plot(
+    kind='bar', ax=axes[1], color=PALETTE_2, edgecolor='white', linewidth=0.5
+)
+axes[1].set_title('Monthly Attrition Trend')
+axes[1].set_xlabel('Month')
+axes[1].set_ylabel('Number of Leavers')
+axes[1].tick_params(axis='x', rotation=45)
+axes[1].legend(title='Category', frameon=False)
 
 # ── 2c  Top off-board reasons ────────────────────────────────────────────────
 if COL['reason'] in vol.columns:
