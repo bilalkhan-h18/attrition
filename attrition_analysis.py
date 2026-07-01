@@ -911,39 +911,176 @@ plt.show()
 
 
 # =============================================================================
-# 13. CORRELATION ANALYSIS  (all leavers + per cohort)
+# 13. FEATURE IMPACT ON ATTRITION  (univariate + multivariate)
 # =============================================================================
+# Goal: which individual features are most associated with an employee being a
+# VOLUNTARY leaver (univariate), and which COMBINATIONS of features carry the
+# highest risk (multivariate) — not how features correlate with each other.
 print('\n' + '='*65)
-print('SECTION 13 – CORRELATION ANALYSIS')
+print('SECTION 13 – FEATURE IMPACT ON ATTRITION (Univariate + Multivariate)')
 print('='*65)
 
-corr_cols = [c for c in [COL['age'], COL['tenure'], COL['daily_salary'],
-                           COL['base_pay'], COL['commute_km']]
-             if c in turnover.columns]
+from scipy.stats import pointbiserialr
 
-fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-for ax, (name, df) in zip(axes, COHORTS.items()):
-    corr_matrix = df[corr_cols].corr()
-    print(f'\n[{name}] Correlation matrix:')
-    print(corr_matrix.round(3).to_string())
-    sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm',
-                vmin=-1, vmax=1, center=0, linewidths=0.5, ax=ax, square=True,
-                cbar=False,
-                xticklabels=[c.replace('_', ' ') for c in corr_cols],
-                yticklabels=[c.replace('_', ' ') for c in corr_cols])
-    ax.set_title(f'{name}')
-fig.suptitle('Section 13 – Correlation Matrix (Numeric Variables)',
-             fontweight='bold', fontsize=14)
-plt.savefig('s13_correlation_heatmaps.png', bbox_inches='tight')
+# ── 13a  Univariate – numeric features vs Is_Voluntary ──────────────────────
+# Point-biserial correlation = Pearson r between a continuous variable and a
+# binary target. It answers: "as this number goes up, does the odds of
+# leaving VOLUNTARILY (vs involuntarily) go up or down?"
+impact_num_cols = [c for c in [COL['age'], COL['tenure'], COL['daily_salary'],
+                                 COL['base_pay'], COL['commute_km']]
+                   if c in turnover.columns]
+
+pb_results = []
+for col in impact_num_cols:
+    valid = turnover[[col, 'Is_Voluntary']].dropna()
+    if len(valid) > 2:
+        r, p = pointbiserialr(valid['Is_Voluntary'], valid[col])
+        pb_results.append({'Feature': col, 'Point_Biserial_r': round(r, 3),
+                           'p_value': round(p, 4),
+                           'Significant': 'Yes' if p < 0.05 else 'No'})
+
+pb_df = pd.DataFrame(pb_results).sort_values('Point_Biserial_r', key=abs, ascending=False)
+print('\n[Univariate – Numeric] Correlation of each feature with being a VOLUNTARY leaver:')
+print(pb_df.to_string(index=False))
+print('  (positive r => higher values associated with VOLUNTARY exit;')
+print('   negative r => higher values associated with INVOLUNTARY exit)')
+
+fig, ax = plt.subplots(figsize=(8, 4))
+colours = [BRAND_BLUE if s == 'Yes' else BRAND_ORANGE for s in pb_df['Significant']]
+ax.barh(pb_df['Feature'].str.replace('_', ' '), pb_df['Point_Biserial_r'], color=colours)
+ax.axvline(0, color='black', linewidth=0.8)
+ax.set_title('Section 13a – Numeric Feature Impact on Voluntary Attrition')
+ax.set_xlabel('Point-Biserial Correlation with Is_Voluntary')
+plt.savefig('s13a_numeric_feature_impact.png', bbox_inches='tight')
 plt.show()
+
+# ── 13b  Univariate – categorical features vs Is_Voluntary ──────────────────
+# Reuses the Cramér's V effect sizes already computed in Section 11 (each
+# tests association between a categorical feature and Is_Voluntary).
+print("\n[Univariate – Categorical] Cramér's V association with voluntary/involuntary split:")
+print(chi_df.to_string(index=False))
+
+# ── 13c  Combined univariate ranking (numeric + categorical) ────────────────
+combined_impact = pd.concat([
+    pb_df.assign(Type='Numeric', Effect_Size=pb_df['Point_Biserial_r'].abs())[
+        ['Feature', 'Type', 'Effect_Size', 'p_value', 'Significant']],
+    chi_df.assign(Type='Categorical', Effect_Size=chi_df['Cramers_V'])[
+        ['Variable', 'Type', 'Effect_Size', 'p_value', 'Significant']
+    ].rename(columns={'Variable': 'Feature'}),
+], ignore_index=True).sort_values('Effect_Size', ascending=False)
+
+print('\n[Combined Univariate Ranking] All features ranked by effect size'
+      ' (|r| for numeric, Cramér\'s V for categorical):')
+print(combined_impact.to_string(index=False))
+
+fig, ax = plt.subplots(figsize=(9, max(4, len(combined_impact) * 0.45)))
+colours = [BRAND_BLUE if t == 'Numeric' else BRAND_ORANGE for t in combined_impact['Type']]
+ax.barh(combined_impact['Feature'].str.replace('_', ' '), combined_impact['Effect_Size'], color=colours)
+ax.invert_yaxis()
+ax.set_title('Section 13b – Combined Univariate Feature Ranking (Impact on Attrition Type)')
+ax.set_xlabel('Effect Size (|point-biserial r| or Cramér\'s V)')
+from matplotlib.patches import Patch
+ax.legend(handles=[Patch(color=BRAND_BLUE, label='Numeric'),
+                    Patch(color=BRAND_ORANGE, label='Categorical')], frameon=False)
+plt.savefig('s13b_combined_univariate_ranking.png', bbox_inches='tight')
+plt.show()
+
+# ── 13d  Multivariate – which COMBINATIONS of features drive attrition ──────
+# A single linear model (Section 12) can miss non-linear interactions
+# (e.g. "young AND long commute" being riskier than either factor alone).
+# A Random Forest captures these combinations and ranks feature importance
+# in a way that reflects interaction effects, not just individual linear
+# association.
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.inspection import permutation_importance
+
+    rf_cat_cols = [c for c in [COL['harrods_band'], COL['tenure_band'],
+                                 COL['area'], COL['commute_band']]
+                   if c in turnover.columns]
+    rf_df = turnover[impact_num_cols + rf_cat_cols + ['Is_Voluntary']].dropna()
+    rf_df_enc = pd.get_dummies(rf_df, columns=rf_cat_cols, drop_first=True)
+
+    rf_features = [c for c in rf_df_enc.columns if c != 'Is_Voluntary']
+    X_rf = rf_df_enc[rf_features]
+    y_rf = rf_df_enc['Is_Voluntary']
+
+    rf_model = RandomForestClassifier(
+        n_estimators=300, max_depth=5, random_state=42, class_weight='balanced'
+    )
+    rf_model.fit(X_rf, y_rf)
+
+    # Built-in importance captures interactions the tree structure exploits
+    rf_importance = pd.Series(rf_model.feature_importances_, index=rf_features)
+
+    # Permutation importance – more robust, measures accuracy drop when a
+    # feature is shuffled, so correlated/combined effects are reflected too
+    perm = permutation_importance(rf_model, X_rf, y_rf, n_repeats=20, random_state=42)
+    perm_importance = pd.Series(perm.importances_mean, index=rf_features)
+
+    rf_summary = pd.DataFrame({
+        'Feature': rf_features,
+        'RF_Importance': rf_importance.values.round(4),
+        'Permutation_Importance': perm_importance.values.round(4),
+    }).sort_values('Permutation_Importance', ascending=False)
+
+    print('\n[Multivariate – Random Forest] Feature importance '
+          '(captures non-linear combinations/interactions):')
+    print(rf_summary.head(15).to_string(index=False))
+
+    fig, ax = plt.subplots(figsize=(9, max(4, min(15, len(rf_summary)) * 0.4)))
+    top_rf = rf_summary.head(15).iloc[::-1]
+    ax.barh(top_rf['Feature'].str.replace('_', ' '), top_rf['Permutation_Importance'], color=BRAND_GREEN)
+    ax.set_title('Section 13c – Multivariate Feature Importance (Random Forest)')
+    ax.set_xlabel('Permutation Importance (accuracy drop when shuffled)')
+    plt.savefig('s13c_multivariate_feature_importance.png', bbox_inches='tight')
+    plt.show()
+
+except ImportError:
+    print('\n[Multivariate] scikit-learn not installed – skipping Random Forest '
+          'importance. Run: pip install scikit-learn')
+    rf_summary = pd.DataFrame()
+
+# ── 13e  Highest-risk feature COMBINATIONS (interaction heatmap) ────────────
+# Takes the top-2 categorical drivers from the Cramér's V ranking and shows
+# voluntary-exit share for every combination of their categories, to surface
+# specific high-risk segments (e.g. "Area X + Tenure Band <1yr").
+top2_cat = chi_df.sort_values('Cramers_V', ascending=False)['Variable'].head(2).tolist()
+if len(top2_cat) == 2:
+    var1, var2 = top2_cat
+    combo_ct = pd.crosstab(turnover[var1], turnover[var2])
+    combo_vol_pct = (
+        turnover.groupby([var1, var2])['Is_Voluntary'].mean().mul(100).unstack()
+    )
+    combo_n = turnover.groupby([var1, var2]).size().unstack(fill_value=0)
+    # Mask combinations with too few leavers to be meaningful (n < 5)
+    combo_vol_pct_masked = combo_vol_pct.where(combo_n >= 5)
+
+    fig, ax = plt.subplots(figsize=(max(10, combo_vol_pct_masked.shape[1] * 1.1),
+                                    max(6, combo_vol_pct_masked.shape[0] * 0.6)))
+    sns.heatmap(combo_vol_pct_masked, annot=True, fmt='.0f', cmap='RdYlGn_r',
+                linewidths=0.5, ax=ax, cbar_kws={'label': '% Voluntary'})
+    ax.set_title(f'Section 13d – Voluntary Exit % by {var1.replace("_"," ")} '
+                 f'× {var2.replace("_"," ")} (cells with n<5 hidden)')
+    ax.set_xlabel(var2.replace('_', ' '))
+    ax.set_ylabel(var1.replace('_', ' '))
+    plt.savefig('s13d_top_risk_combination_heatmap.png', bbox_inches='tight')
+    plt.show()
+
+    print(f'\n[Multivariate – Interaction] Voluntary exit % by {var1} × {var2} '
+          f'(cells with fewer than 5 leavers excluded as unreliable):')
+    print(combo_vol_pct_masked.round(1).to_string())
 
 print("""
 Interpretation note:
-  Correlations describe the strength of LINEAR association between variables.
-  They do NOT imply that one variable causes another.
-  High correlation between salary and tenure, for example, likely reflects
-  pay progression over time rather than salary directly causing retention.
-  Always contextualise statistical findings with domain knowledge.
+  Point-biserial r and Cramér's V show ASSOCIATION between a feature and
+  whether an exit was voluntary vs involuntary — not causation. Random
+  Forest / permutation importance captures non-linear effects and feature
+  combinations that a single correlation coefficient cannot, but importance
+  scores still describe predictive association within this dataset, not a
+  guaranteed causal driver. Use these rankings to prioritise where to
+  investigate further (e.g. stay interviews, pay benchmarking) rather than
+  as proof of what causes attrition.
 """)
 
 
@@ -978,6 +1115,16 @@ try:
     top_lr_predictor = odds_plot.iloc[0]['Feature'].replace('_', ' ')
 except Exception:
     top_lr_predictor = 'N/A'
+
+try:
+    top_univariate_feature = combined_impact.iloc[0]['Feature'].replace('_', ' ')
+except Exception:
+    top_univariate_feature = 'N/A'
+
+try:
+    top_multivariate_feature = rf_summary.iloc[0]['Feature'].replace('_', ' ') if not rf_summary.empty else 'N/A'
+except Exception:
+    top_multivariate_feature = 'N/A'
 
 print(f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -1017,6 +1164,8 @@ print(f"""
     {', '.join(significant_drivers) if significant_drivers else 'None significant'}
   • Strongest categorical driver (Cramér's V): {top_sig_driver}
   • Strongest regression predictor of voluntary exit: {top_lr_predictor}
+  • Top univariate feature overall (Section 13b): {top_univariate_feature}
+  • Top multivariate feature, incl. interactions (Section 13c): {top_multivariate_feature}
 
   POTENTIAL RETENTION / WORKFORCE ACTIONS
   ─────────────────────────────────────────────────────────────
