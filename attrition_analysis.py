@@ -1,8 +1,9 @@
 # =============================================================================
 # EMPLOYEE ATTRITION ANALYSIS
 # File: attrition_analysis.py
-# Description: Exploratory and diagnostic attrition analysis identifying
-#              patterns and potential drivers of voluntary attrition.
+# Description: Exploratory and diagnostic attrition analysis of BOTH voluntary
+#              and involuntary turnover — analysed in isolation and combined —
+#              identifying patterns and potential drivers of attrition.
 # =============================================================================
 
 import pandas as pd
@@ -37,6 +38,17 @@ BRAND_BLUE   = '#1F4E79'
 BRAND_ORANGE = '#C55A11'
 BRAND_GREEN  = '#375623'
 PALETTE_2    = [BRAND_BLUE, BRAND_ORANGE]
+
+# Consistent colour per cohort so charts read the same across sections
+COHORT_COLOUR = {
+    'All Leavers': BRAND_GREEN,
+    'Voluntary'  : BRAND_BLUE,
+    'Involuntary': BRAND_ORANGE,
+}
+
+def slug(name):
+    """Filesystem-safe short tag for a cohort name (e.g. 'All Leavers' -> 'all')."""
+    return name.lower().split()[0]
 
 FILE_PATH = 'Atrrition Data.xlsx'   # update path as required
 
@@ -73,8 +85,6 @@ print('\nTurnover shape :', turnover.shape)
 print('Headcount shape:', headcount.shape)
 
 # ── 1.3  Standardise key column references ───────────────────────────────────
-# Map cleaned names → canonical names used throughout the script.
-# Adjust the left-hand keys if your file uses slightly different names.
 COL = {
     'category'         : 'Offboard_Category',
     'reason'           : 'Offboard_Reason',
@@ -140,9 +150,8 @@ print(missing_report.to_string())
 
 # ── 1.6  Binary target variable ──────────────────────────────────────────────
 if COL['category'] in turnover.columns:
-    turnover['Is_Voluntary'] = (
-        turnover[COL['category']].str.strip().str.title() == 'Voluntary'
-    ).astype(int)
+    turnover[COL['category']] = turnover[COL['category']].str.strip().str.title()
+    turnover['Is_Voluntary'] = (turnover[COL['category']] == 'Voluntary').astype(int)
 else:
     raise KeyError(f"Column '{COL['category']}' not found – check sheet/column names.")
 
@@ -150,13 +159,23 @@ else:
 if COL['tenure'] in turnover.columns:
     turnover['Early_Leaver'] = (turnover[COL['tenure']] < 1).astype(int)
 
-# ── 1.8  Voluntary-only subset ───────────────────────────────────────────────
-vol = turnover[turnover['Is_Voluntary'] == 1].copy()
+# ── 1.8  Define analysis cohorts ─────────────────────────────────────────────
+# Every deep-dive section runs across these three cohorts so that voluntary and
+# involuntary turnover are each examined in isolation AND combined.
+COHORTS = {
+    'All Leavers': turnover.copy(),
+    'Voluntary'  : turnover[turnover['Is_Voluntary'] == 1].copy(),
+    'Involuntary': turnover[turnover['Is_Voluntary'] == 0].copy(),
+}
+
+# Convenience handles retained for the comparative sections
+vol   = COHORTS['Voluntary']
+invol = COHORTS['Involuntary']
 
 print('\nData preparation complete.')
 print(f'  Total records  : {len(turnover):,}')
-print(f'  Voluntary      : {turnover["Is_Voluntary"].sum():,}')
-print(f'  Involuntary    : {(turnover["Is_Voluntary"] == 0).sum():,}')
+for name, df in COHORTS.items():
+    print(f'  {name:<12} : {len(df):,}')
 
 
 # =============================================================================
@@ -176,8 +195,8 @@ print(f'\n  Total leavers        : {total:,}')
 print(f'  Voluntary leavers    : {total_vol:,}  ({pct_vol:.1f}%)')
 print(f'  Involuntary leavers  : {total_invol:,}  ({pct_invol:.1f}%)')
 
-# ── 2a  Donut chart – vol vs invol ───────────────────────────────────────────
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+# ── 2a  Donut + monthly trend ────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(15, 5))
 
 wedges, texts, autotexts = axes[0].pie(
     [total_vol, total_invol],
@@ -192,7 +211,7 @@ for at in autotexts:
     at.set_fontweight('bold')
 axes[0].set_title('Voluntary vs Involuntary Attrition')
 
-# ── 2b  Monthly attrition trend (derived from Termination_Date) ──────────────
+# Monthly attrition trend (derived from Termination_Date), split by category
 monthly = (
     turnover.groupby(['Term_Month', COL['category']])
             .size()
@@ -212,27 +231,31 @@ axes[1].set_ylabel('Number of Leavers')
 axes[1].tick_params(axis='x', rotation=45)
 axes[1].legend(title='Category', frameon=False)
 
-# ── 2c  Top off-board reasons ────────────────────────────────────────────────
-if COL['reason'] in vol.columns:
-    top_reasons = vol[COL['reason']].value_counts().head(12)
-    top_reasons.sort_values().plot(
-        kind='barh', ax=axes[2], color=BRAND_BLUE, edgecolor='white'
-    )
-    axes[2].set_title('Top Voluntary Off-Board Reasons')
-    axes[2].set_xlabel('Number of Leavers')
-    axes[2].set_ylabel('')
-
 fig.suptitle('Section 2 – High-Level Attrition Summary', fontweight='bold', fontsize=14)
 plt.savefig('s2_high_level_summary.png', bbox_inches='tight')
 plt.show()
 
-print('\nTop 12 voluntary off-board reasons:')
-print(top_reasons.to_string())
+# ── 2b  Top off-board reasons for EACH cohort ────────────────────────────────
+if COL['reason'] in turnover.columns:
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    for ax, (name, df) in zip(axes, COHORTS.items()):
+        top = df[COL['reason']].value_counts().head(10)
+        top.sort_values().plot(kind='barh', ax=ax, color=COHORT_COLOUR[name],
+                               edgecolor='white')
+        ax.set_title(f'Top Off-Board Reasons – {name}')
+        ax.set_xlabel('Number of Leavers')
+        ax.set_ylabel('')
+        print(f'\nTop off-board reasons – {name}:')
+        print(top.to_string())
+    fig.suptitle('Section 2 – Top Off-Board Reasons by Cohort', fontweight='bold', fontsize=14)
+    plt.savefig('s2_top_reasons_by_cohort.png', bbox_inches='tight')
+    plt.show()
 
 
 # =============================================================================
 # 3. VOLUNTARY VS INVOLUNTARY LEAVER PROFILE
 # =============================================================================
+# (Inherently comparative – contrasts the two cohorts directly.)
 print('\n' + '='*65)
 print('SECTION 3 – VOLUNTARY VS INVOLUNTARY LEAVER PROFILE')
 print('='*65)
@@ -298,6 +321,7 @@ plt.show()
 # =============================================================================
 # 4. TENURE ANALYSIS
 # =============================================================================
+# (Comparative – both cohorts shown side by side across tenure bands.)
 print('\n' + '='*65)
 print('SECTION 4 – TENURE ANALYSIS')
 print('='*65)
@@ -305,7 +329,6 @@ print('='*65)
 TENURE_ORDER = ['<1 Year', '1-2 Years', '2-3 Years', '3-5 Years', '5+ Years']
 
 if COL['tenure_band'] in turnover.columns:
-    # Reorder if categories match
     existing_bands = turnover[COL['tenure_band']].dropna().unique().tolist()
     order = [b for b in TENURE_ORDER if b in existing_bands] + \
             [b for b in existing_bands if b not in TENURE_ORDER]
@@ -326,93 +349,87 @@ if COL['tenure_band'] in turnover.columns:
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Stacked bar
-    tenure_summary.plot(kind='bar', stacked=True, ax=axes[0],
+    # Grouped bar – counts by tenure band and category
+    tenure_summary.plot(kind='bar', ax=axes[0],
                         color=PALETTE_2, edgecolor='white')
-    axes[0].set_title('Leavers by Tenure Band')
+    axes[0].set_title('Leavers by Tenure Band and Category')
     axes[0].set_xlabel('Tenure Band')
     axes[0].set_ylabel('Number of Leavers')
     axes[0].tick_params(axis='x', rotation=30)
     axes[0].legend(title='Category', frameon=False)
 
-    # Voluntary % by tenure band
-    vol_pct_tenure = (
-        turnover.groupby(COL['tenure_band'])['Is_Voluntary']
-                .mean()
-                .mul(100)
-                .reindex([o for o in order if o in turnover[COL['tenure_band']].unique()])
-    )
-    axes[1].bar(range(len(vol_pct_tenure)), vol_pct_tenure.values, color=BRAND_BLUE)
-    axes[1].set_xticks(range(len(vol_pct_tenure)))
-    axes[1].set_xticklabels(vol_pct_tenure.index, rotation=30, ha='right')
-    axes[1].set_title('Voluntary Attrition % by Tenure Band')
-    axes[1].set_ylabel('% Voluntary')
+    # Share of each category within each tenure band (100% stacked)
+    tenure_share = tenure_summary.div(tenure_summary.sum(axis=1), axis=0) * 100
+    tenure_share.plot(kind='bar', stacked=True, ax=axes[1],
+                      color=PALETTE_2, edgecolor='white')
+    axes[1].set_title('Category Split within each Tenure Band (%)')
+    axes[1].set_xlabel('Tenure Band')
+    axes[1].set_ylabel('% of Leavers')
+    axes[1].tick_params(axis='x', rotation=30)
     axes[1].yaxis.set_major_formatter(mticker.PercentFormatter())
+    axes[1].legend(title='Category', frameon=False)
 
     fig.suptitle('Section 4 – Tenure Analysis', fontweight='bold', fontsize=13)
     plt.savefig('s4_tenure_analysis.png', bbox_inches='tight')
     plt.show()
 
-    print('\nVoluntary % by Tenure Band:')
-    print(vol_pct_tenure.round(1).to_string())
+    print('\nLeavers by Tenure Band and Category:')
+    print(tenure_summary.to_string())
 
 
 # =============================================================================
-# 5. EARLY LEAVER ANALYSIS
+# 5. EARLY LEAVER ANALYSIS  (Tenure < 1 Year)  — per cohort
 # =============================================================================
 print('\n' + '='*65)
 print('SECTION 5 – EARLY LEAVER ANALYSIS (Tenure < 1 Year)')
 print('='*65)
 
-early_vol = vol[vol['Early_Leaver'] == 1].copy()
-non_early_vol = vol[vol['Early_Leaver'] == 0].copy()
-
-pct_early = len(early_vol) / len(vol) * 100 if len(vol) > 0 else 0
-print(f'\n  Voluntary early leavers  : {len(early_vol):,}  ({pct_early:.1f}% of voluntary exits)')
-
-# ── 5a  Numeric comparison ───────────────────────────────────────────────────
 early_num_cols = [c for c in [COL['age'], COL['daily_salary'], COL['commute_km']]
-                  if c in vol.columns]
+                  if c in turnover.columns]
 
-fig, axes = plt.subplots(1, len(early_num_cols), figsize=(4 * len(early_num_cols), 5))
-if len(early_num_cols) == 1:
-    axes = [axes]
+# Track early-leaver % per cohort for the executive summary
+early_pct_by_cohort = {}
 
-vol['Early_Label'] = vol['Early_Leaver'].map({1: 'Early (<1yr)', 0: 'Non-Early'})
-for ax, col in zip(axes, early_num_cols):
-    sns.boxplot(data=vol, x='Early_Label', y=col, ax=ax,
-                palette=[BRAND_ORANGE, BRAND_BLUE], fliersize=3)
-    ax.set_title(col.replace('_', ' '))
-    ax.set_xlabel('')
+def early_leaver_analysis(df, name):
+    """Compare early vs non-early leavers within a single cohort."""
+    if len(df) == 0:
+        return
+    df = df.copy()
+    early     = df[df['Early_Leaver'] == 1]
+    pct_early = len(early) / len(df) * 100
+    early_pct_by_cohort[name] = pct_early
+    print(f'\n[{name}] Early leavers (<1yr): {len(early):,} ({pct_early:.1f}% of {name.lower()} exits)')
 
-fig.suptitle('Section 5 – Early vs Non-Early Voluntary Leavers', fontweight='bold', fontsize=13)
-plt.savefig('s5_early_leavers.png', bbox_inches='tight')
-plt.show()
-
-# ── 5b  Top reasons among early leavers ──────────────────────────────────────
-if COL['reason'] in early_vol.columns:
-    early_reasons = early_vol[COL['reason']].value_counts().head(10)
-    print('\nTop reasons among early voluntary leavers:')
-    print(early_reasons.to_string())
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    early_reasons.sort_values().plot(kind='barh', ax=ax, color=BRAND_ORANGE)
-    ax.set_title('Top Reasons – Early Voluntary Leavers (< 1 Year)')
-    ax.set_xlabel('Count')
-    plt.savefig('s5_early_reasons.png', bbox_inches='tight')
+    # Boxplot: early vs non-early on key numerics
+    df['Early_Label'] = df['Early_Leaver'].map({1: 'Early (<1yr)', 0: 'Non-Early'})
+    fig, axes = plt.subplots(1, len(early_num_cols), figsize=(4 * len(early_num_cols), 5))
+    if len(early_num_cols) == 1:
+        axes = [axes]
+    for ax, col in zip(axes, early_num_cols):
+        sns.boxplot(data=df, x='Early_Label', y=col, ax=ax,
+                    palette=[BRAND_ORANGE, BRAND_BLUE], fliersize=3)
+        ax.set_title(col.replace('_', ' '))
+        ax.set_xlabel('')
+    fig.suptitle(f'Section 5 – Early vs Non-Early Leavers ({name})',
+                 fontweight='bold', fontsize=13)
+    plt.savefig(f's5_early_leavers_{slug(name)}.png', bbox_inches='tight')
     plt.show()
 
-# ── 5c  Area breakdown ───────────────────────────────────────────────────────
-if COL['area'] in vol.columns:
-    area_early = vol.groupby(COL['area'])['Early_Leaver'].mean().mul(100).round(1)
-    print('\nEarly leaver % by Area (voluntary exits only):')
-    print(area_early.sort_values(ascending=False).to_string())
+    # Top reasons among early leavers
+    if COL['reason'] in early.columns and len(early) > 0:
+        early_reasons = early[COL['reason']].value_counts().head(10)
+        print(f'[{name}] Top reasons among early leavers:')
+        print(early_reasons.to_string())
 
-# ── 5d  Harrods Band breakdown ───────────────────────────────────────────────
-if COL['harrods_band'] in vol.columns:
-    band_early = vol.groupby(COL['harrods_band'])['Early_Leaver'].mean().mul(100).round(1)
-    print('\nEarly leaver % by Harrods Band:')
-    print(band_early.sort_values(ascending=False).to_string())
+    # Early-leaver rate by Area and Harrods Band
+    for var, label in [(COL['area'], 'Area'), (COL['harrods_band'], 'Harrods Band')]:
+        if var in df.columns:
+            rate = df.groupby(var)['Early_Leaver'].mean().mul(100).round(1)
+            print(f'[{name}] Early leaver % by {label}:')
+            print(rate.sort_values(ascending=False).head(10).to_string())
+
+for name, df in COHORTS.items():
+    early_leaver_analysis(df, name)
 
 
 # =============================================================================
@@ -433,40 +450,38 @@ if COL['commute_km'] in turnover.columns:
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Boxplot
+    # Boxplot by category
     sns.boxplot(data=turnover, x=COL['category'], y=COL['commute_km'],
                 ax=axes[0], palette=PALETTE_2, fliersize=3)
     axes[0].set_title('Commute Distance by Off-Board Category')
     axes[0].set_xlabel('')
 
-    # Bar chart – % voluntary by commute band
+    # Counts by commute band and category
     if COL['commute_band'] in turnover.columns:
-        vol_pct_commute = (
-            turnover.groupby(COL['commute_band'])['Is_Voluntary']
-                    .mean()
-                    .mul(100)
-                    .sort_values(ascending=False)
+        commute_ct = (
+            turnover.groupby([COL['commute_band'], COL['category']])
+                    .size().unstack(fill_value=0)
         )
-        axes[1].bar(range(len(vol_pct_commute)), vol_pct_commute.values, color=BRAND_BLUE)
-        axes[1].set_xticks(range(len(vol_pct_commute)))
-        axes[1].set_xticklabels(vol_pct_commute.index, rotation=30, ha='right')
-        axes[1].set_title('Voluntary Attrition % by Commute Band')
-        axes[1].set_ylabel('% Voluntary')
-        axes[1].yaxis.set_major_formatter(mticker.PercentFormatter())
+        commute_ct.plot(kind='bar', ax=axes[1], color=PALETTE_2, edgecolor='white')
+        axes[1].set_title('Leavers by Commute Band and Category')
+        axes[1].set_xlabel('Commute Band')
+        axes[1].set_ylabel('Number of Leavers')
+        axes[1].tick_params(axis='x', rotation=30)
+        axes[1].legend(title='Category', frameon=False)
 
     fig.suptitle('Section 6 – Commute Analysis', fontweight='bold', fontsize=13)
     plt.savefig('s6_commute_analysis.png', bbox_inches='tight')
     plt.show()
 
-# ── 6b  Commute-related resignation reasons ───────────────────────────────────
-if COL['reason'] in vol.columns:
-    commute_keywords = ['commute', 'travel', 'distance', 'location']
-    commute_leavers = vol[
-        vol[COL['reason']].str.lower().str.contains('|'.join(commute_keywords), na=False)
-    ]
-    print(f'\n  Voluntary leavers citing commute-related reasons: {len(commute_leavers):,}')
-    if len(commute_leavers) > 0:
-        print(commute_leavers[COL['commute_km']].describe().round(2))
+# ── 6b  Commute-related reasons per cohort ────────────────────────────────────
+if COL['reason'] in turnover.columns:
+    commute_keywords = ['commute', 'travel', 'distance', 'location', 'relocat']
+    for name, df in COHORTS.items():
+        hit = df[df[COL['reason']].str.lower()
+                   .str.contains('|'.join(commute_keywords), na=False)]
+        print(f'\n[{name}] Leavers citing commute/relocation reasons: {len(hit):,}')
+        if len(hit) > 0 and COL['commute_km'] in df.columns:
+            print(f'   Median commute (km): {hit[COL["commute_km"]].median():.1f}')
 
 
 # =============================================================================
@@ -487,51 +502,48 @@ if pay_cols:
     print('\nPay summary by Off-Board Category:')
     print(pay_summary.to_string())
 
+    # Boxplots by category
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
     for ax, col in zip(axes, pay_cols[:2]):
         sns.boxplot(data=turnover, x=COL['category'], y=col,
                     ax=ax, palette=PALETTE_2, fliersize=3)
         ax.set_title(f'{col.replace("_", " ")} by Category')
         ax.set_xlabel('')
-
     fig.suptitle('Section 7 – Pay Analysis', fontweight='bold', fontsize=13)
     plt.savefig('s7_pay_boxplots.png', bbox_inches='tight')
     plt.show()
 
-    # Pay by resignation reason
-    if COL['reason'] in vol.columns and COL['daily_salary'] in vol.columns:
-        pay_by_reason = (
-            vol.groupby(COL['reason'])[COL['daily_salary']]
-               .median()
-               .sort_values()
-        )
-        fig, ax = plt.subplots(figsize=(10, 7))
-        pay_by_reason.plot(kind='barh', ax=ax, color=BRAND_BLUE)
-        ax.set_title('Median Daily Salary by Voluntary Off-Board Reason')
-        ax.set_xlabel('Median Daily Salary (£)')
-        plt.savefig('s7_pay_by_reason.png', bbox_inches='tight')
-        plt.show()
+    # Median daily salary by reason, per cohort (vol & invol shown separately)
+    if COL['reason'] in turnover.columns and COL['daily_salary'] in turnover.columns:
+        for name in ['Voluntary', 'Involuntary']:
+            df = COHORTS[name]
+            if len(df) == 0:
+                continue
+            pay_by_reason = df.groupby(COL['reason'])[COL['daily_salary']].median().sort_values()
+            fig, ax = plt.subplots(figsize=(10, max(4, len(pay_by_reason) * 0.4)))
+            pay_by_reason.plot(kind='barh', ax=ax, color=COHORT_COLOUR[name])
+            ax.set_title(f'Median Daily Salary by Off-Board Reason ({name})')
+            ax.set_xlabel('Median Daily Salary (£)')
+            plt.savefig(f's7_pay_by_reason_{slug(name)}.png', bbox_inches='tight')
+            plt.show()
 
-    # Pay-dissatisfaction comparison
-    if COL['reason'] in vol.columns:
+    # Pay-dissatisfaction comparison (voluntary leavers only – reason is a resignation)
+    if COL['reason'] in vol.columns and COL['daily_salary'] in vol.columns:
         pay_keywords = ['pay', 'salary', 'compensation', 'wage', 'remuneration']
-        pay_leavers    = vol[vol[COL['reason']].str.lower()
-                              .str.contains('|'.join(pay_keywords), na=False)]
+        pay_leavers     = vol[vol[COL['reason']].str.lower()
+                               .str.contains('|'.join(pay_keywords), na=False)]
         non_pay_leavers = vol[~vol[COL['reason']].str.lower()
                                .str.contains('|'.join(pay_keywords), na=False)]
-
         print(f'\n  Pay-related voluntary leavers : {len(pay_leavers):,}')
-        if len(pay_leavers) > 0 and COL['daily_salary'] in vol.columns:
+        if len(pay_leavers) > 0:
             print(f'  Median salary (pay leavers)   : £{pay_leavers[COL["daily_salary"]].median():,.0f}')
             print(f'  Median salary (other vol)     : £{non_pay_leavers[COL["daily_salary"]].median():,.0f}')
 
-    # Pay by Harrods Band
+    # Pay by Harrods Band and category
     if COL['harrods_band'] in turnover.columns and COL['daily_salary'] in turnover.columns:
         pay_band = (
             turnover.groupby([COL['harrods_band'], COL['category']])[COL['daily_salary']]
-                    .median()
-                    .unstack()
+                    .median().unstack()
         )
         fig, ax = plt.subplots(figsize=(10, 5))
         pay_band.plot(kind='bar', ax=ax, color=PALETTE_2, edgecolor='white')
@@ -545,7 +557,7 @@ if pay_cols:
 
 
 # =============================================================================
-# 8. DEPARTMENT & ORGANISATIONAL HOTSPOT ANALYSIS
+# 8. DEPARTMENT & ORGANISATIONAL HOTSPOT ANALYSIS  — per cohort
 # =============================================================================
 print('\n' + '='*65)
 print('SECTION 8 – ORGANISATIONAL HOTSPOT ANALYSIS')
@@ -555,190 +567,201 @@ org_vars = [c for c in [COL['area'], COL['division'], COL['business_unit'],
                          COL['harrods_band'], COL['job_profile']]
             if c in turnover.columns]
 
-# ── 8a  Ranked tables ────────────────────────────────────────────────────────
-for var in org_vars:
-    vol_by = vol[var].value_counts()
-    total_by = turnover[var].value_counts()
-    pct_by = (vol_by / total_by * 100).round(1)
-    ranked = pd.DataFrame({
-        'Voluntary_Leavers': vol_by,
-        'Total_Leavers': total_by,
-        'Vol_%': pct_by,
-    }).sort_values('Voluntary_Leavers', ascending=False).head(15)
-    print(f'\nTop 15 voluntary leaver hotspots by {var}:')
-    print(ranked.to_string())
+# Track top hotspots per cohort for the executive summary
+hotspots = {}
 
-# ── 8b  Bar charts ───────────────────────────────────────────────────────────
-fig, axes = plt.subplots(1, min(len(org_vars), 3), figsize=(6 * min(len(org_vars), 3), 5))
-if len(org_vars) == 1:
-    axes = [axes]
+def hotspot_analysis(df, name):
+    """Ranked tables + bar charts of leaver counts by org dimension for a cohort."""
+    if len(df) == 0:
+        return
+    hotspots[name] = {}
+    for var in org_vars:
+        counts   = df[var].value_counts()
+        share    = (counts / counts.sum() * 100).round(1)
+        # Rate = this cohort's leavers as a share of ALL leavers in that group
+        all_by   = turnover[var].value_counts()
+        pct_all  = (counts / all_by * 100).round(1)
+        ranked = pd.DataFrame({
+            'Leavers'          : counts,
+            'Pct_of_Cohort'    : share,
+            'Pct_of_All_Leavers': pct_all,
+        }).sort_values('Leavers', ascending=False).head(15)
+        print(f'\n[{name}] Top hotspots by {var}:')
+        print(ranked.to_string())
+        if var in (COL['area'], COL['division']):
+            hotspots[name][var] = counts.idxmax() if len(counts) else 'N/A'
 
-for ax, var in zip(axes, org_vars[:3]):
-    top_vol = vol[var].value_counts().head(10)
-    top_vol.sort_values().plot(kind='barh', ax=ax, color=BRAND_BLUE)
-    ax.set_title(f'Voluntary Leavers by {var.replace("_", " ")}')
-    ax.set_xlabel('Count')
-
-fig.suptitle('Section 8 – Organisational Hotspots', fontweight='bold', fontsize=13)
-plt.savefig('s8_hotspot_bars.png', bbox_inches='tight')
-plt.show()
-
-# ── 8c  Heatmap – Area × Division ────────────────────────────────────────────
-if COL['area'] in vol.columns and COL['division'] in vol.columns:
-    heat_data = (
-        vol.groupby([COL['area'], COL['division']])
-           .size()
-           .unstack(fill_value=0)
-    )
-    fig, ax = plt.subplots(figsize=(max(10, heat_data.shape[1] * 1.2),
-                                    max(6, heat_data.shape[0] * 0.6)))
-    sns.heatmap(heat_data, annot=True, fmt='d', cmap='YlOrRd',
-                linewidths=0.5, ax=ax, cbar_kws={'label': 'Voluntary Leavers'})
-    ax.set_title('Section 8 – Voluntary Leavers Heatmap: Area × Division')
-    ax.set_xlabel('Division')
-    ax.set_ylabel('Area')
-    plt.savefig('s8_heatmap_area_division.png', bbox_inches='tight')
+    # Bar charts for the first three org dimensions
+    show_vars = org_vars[:3]
+    fig, axes = plt.subplots(1, len(show_vars), figsize=(6 * len(show_vars), 5))
+    if len(show_vars) == 1:
+        axes = [axes]
+    for ax, var in zip(axes, show_vars):
+        top = df[var].value_counts().head(10)
+        top.sort_values().plot(kind='barh', ax=ax, color=COHORT_COLOUR[name])
+        ax.set_title(f'{var.replace("_", " ")}')
+        ax.set_xlabel('Leavers')
+    fig.suptitle(f'Section 8 – Organisational Hotspots ({name})',
+                 fontweight='bold', fontsize=13)
+    plt.savefig(f's8_hotspots_{slug(name)}.png', bbox_inches='tight')
     plt.show()
 
+    # Area x Division heatmap
+    if COL['area'] in df.columns and COL['division'] in df.columns:
+        heat = df.groupby([COL['area'], COL['division']]).size().unstack(fill_value=0)
+        fig, ax = plt.subplots(figsize=(max(10, heat.shape[1] * 1.2),
+                                        max(6, heat.shape[0] * 0.6)))
+        sns.heatmap(heat, annot=True, fmt='d', cmap='YlOrRd',
+                    linewidths=0.5, ax=ax, cbar_kws={'label': 'Leavers'})
+        ax.set_title(f'Section 8 – Leavers Heatmap: Area × Division ({name})')
+        ax.set_xlabel('Division')
+        ax.set_ylabel('Area')
+        plt.savefig(f's8_heatmap_area_division_{slug(name)}.png', bbox_inches='tight')
+        plt.show()
+
+for name, df in COHORTS.items():
+    hotspot_analysis(df, name)
+
 
 # =============================================================================
-# 9. VOLUNTARY REASON ANALYSIS
+# 9. OFF-BOARD REASON ANALYSIS  — voluntary and involuntary
 # =============================================================================
 print('\n' + '='*65)
-print('SECTION 9 – VOLUNTARY REASON ANALYSIS')
+print('SECTION 9 – OFF-BOARD REASON ANALYSIS')
 print('='*65)
 
-if COL['reason'] in vol.columns:
-    top_reasons_overall = vol[COL['reason']].value_counts()
-    print('\nTop voluntary off-board reasons:')
-    print(top_reasons_overall.head(15).to_string())
+def reason_analysis(df, name):
+    """Cross-tabulate off-board reasons against key segments for a cohort."""
+    if len(df) == 0 or COL['reason'] not in df.columns:
+        return
+    top_reasons = df[COL['reason']].value_counts()
+    print(f'\n[{name}] Top off-board reasons:')
+    print(top_reasons.head(15).to_string())
 
     breakdown_vars = [c for c in [COL['tenure_band'], COL['age_band'],
                                    COL['harrods_band'], COL['area']]
-                      if c in vol.columns]
+                      if c in df.columns]
 
     for var in breakdown_vars:
-        ct = pd.crosstab(vol[var], vol[COL['reason']])
+        ct = pd.crosstab(df[var], df[COL['reason']])
+        if ct.empty:
+            continue
 
-        # ── Heatmap ──────────────────────────────────────────────────────────
+        # Heatmap
         fig, ax = plt.subplots(figsize=(max(12, ct.shape[1] * 1.0),
                                         max(5, ct.shape[0] * 0.5)))
         sns.heatmap(ct, annot=True, fmt='d', cmap='Blues',
-                    linewidths=0.3, ax=ax,
-                    cbar_kws={'label': 'Voluntary Leavers'})
-        ax.set_title(f'Off-Board Reason by {var.replace("_", " ")}')
+                    linewidths=0.3, ax=ax, cbar_kws={'label': 'Leavers'})
+        ax.set_title(f'Off-Board Reason by {var.replace("_", " ")} ({name})')
         ax.set_xlabel('Off-Board Reason')
         ax.set_ylabel(var.replace('_', ' '))
-        plt.savefig(f's9_heatmap_{var}.png', bbox_inches='tight')
+        plt.savefig(f's9_heatmap_{var}_{slug(name)}.png', bbox_inches='tight')
         plt.show()
 
-        # ── Stacked bar ───────────────────────────────────────────────────────
+        # 100% stacked bar of top reasons
         ct_pct = ct.div(ct.sum(axis=1), axis=0) * 100
-        top_reasons_list = top_reasons_overall.head(8).index.tolist()
-        ct_pct_top = ct_pct[[c for c in top_reasons_list if c in ct_pct.columns]]
-
+        top_list = top_reasons.head(8).index.tolist()
+        ct_pct_top = ct_pct[[c for c in top_list if c in ct_pct.columns]]
         fig, ax = plt.subplots(figsize=(10, 5))
         ct_pct_top.plot(kind='bar', stacked=True, ax=ax, colormap='tab10', edgecolor='white')
-        ax.set_title(f'Voluntary Reason Breakdown by {var.replace("_", " ")} (%)')
+        ax.set_title(f'Reason Breakdown by {var.replace("_", " ")} – {name} (%)')
         ax.set_xlabel(var.replace('_', ' '))
-        ax.set_ylabel('% of Voluntary Leavers')
+        ax.set_ylabel('% of Leavers')
         ax.legend(title='Reason', bbox_to_anchor=(1.05, 1), loc='upper left', frameon=False)
         ax.tick_params(axis='x', rotation=30)
-        plt.savefig(f's9_stackedbar_{var}.png', bbox_inches='tight')
+        plt.savefig(f's9_stackedbar_{var}_{slug(name)}.png', bbox_inches='tight')
         plt.show()
+
+# Reasons are most meaningful within each category, so run for Voluntary & Involuntary
+for name in ['Voluntary', 'Involuntary']:
+    reason_analysis(COHORTS[name], name)
 
 
 # =============================================================================
-# 10. ATTRITION PERSONAS
+# 10. ATTRITION PERSONAS  — per cohort
 # =============================================================================
 print('\n' + '='*65)
 print('SECTION 10 – ATTRITION PERSONAS')
 print('='*65)
 
-PERSONA_MAP = {
+# Voluntary-oriented persona themes
+PERSONA_MAP_VOL = {
     'Career':             ['Development Opportunities', 'Hired by Competitor', 'Return to Education'],
     'Employee Experience':['Culture', 'Working Environment'],
     'Lifestyle':          ['Commute Time', 'Relocation', 'Work Life Balance'],
     'Personal':           ['Family Reasons', 'Ill Health', 'Visa Expiry'],
 }
+# Involuntary-oriented persona themes
+PERSONA_MAP_INVOL = {
+    'Performance':   ['Performance', 'Capability', 'Conduct', 'Dismissal', 'Gross Misconduct'],
+    'Restructure':   ['Redundancy', 'Restructure', 'Reorganis'],
+    'Contractual':   ['End Of Contract', 'Fixed Term', 'Probation', 'Contract'],
+    'Other Exit':    ['Retirement', 'Tupe', 'Death'],
+}
 
-if COL['reason'] in vol.columns:
-    # Build persona column using partial string matching
-    def assign_persona(reason):
-        if pd.isna(reason):
-            return 'Other'
-        reason_lower = str(reason).lower()
-        for persona, keywords in PERSONA_MAP.items():
-            for kw in keywords:
-                if kw.lower() in reason_lower:
-                    return persona
+def build_persona(reason, mapping):
+    if pd.isna(reason):
         return 'Other'
+    r = str(reason).lower()
+    for persona, keywords in mapping.items():
+        for kw in keywords:
+            if kw.lower() in r:
+                return persona
+    return 'Other'
 
-    vol = vol.copy()
-    vol['Persona'] = vol[COL['reason']].apply(assign_persona)
+def persona_analysis(df, name, mapping):
+    if len(df) == 0 or COL['reason'] not in df.columns:
+        return
+    df = df.copy()
+    df['Persona'] = df[COL['reason']].apply(lambda x: build_persona(x, mapping))
 
-    persona_counts = vol['Persona'].value_counts()
-    print('\nPersona distribution:')
+    persona_counts = df['Persona'].value_counts()
+    print(f'\n[{name}] Persona distribution:')
     print(persona_counts.to_string())
 
-    # Profile numeric stats per persona
     profile_cols = [c for c in [COL['age'], COL['tenure'],
                                   COL['daily_salary'], COL['commute_km']]
-                    if c in vol.columns]
-
-    persona_profile = vol.groupby('Persona')[profile_cols].agg(['mean', 'median']).round(2)
-    print('\nPersona profiles (mean | median):')
-    print(persona_profile.to_string())
-
-    # ── Radar / violin plots ──────────────────────────────────────────────────
+                    if c in df.columns]
     if profile_cols:
-        fig, axes = plt.subplots(1, len(profile_cols),
-                                  figsize=(4 * len(profile_cols), 5))
+        print(f'[{name}] Persona profiles (mean | median):')
+        print(df.groupby('Persona')[profile_cols].agg(['mean', 'median']).round(2).to_string())
+
+        fig, axes = plt.subplots(1, len(profile_cols), figsize=(4 * len(profile_cols), 5))
         if len(profile_cols) == 1:
             axes = [axes]
-
-        palette_persona = sns.color_palette('Set2', n_colors=len(vol['Persona'].unique()))
+        palette_p = sns.color_palette('Set2', n_colors=df['Persona'].nunique())
         for ax, col in zip(axes, profile_cols):
-            sns.violinplot(data=vol, x='Persona', y=col,
-                           ax=ax, palette=palette_persona, inner='box', linewidth=0.8)
+            sns.violinplot(data=df, x='Persona', y=col, ax=ax,
+                           palette=palette_p, inner='box', linewidth=0.8)
             ax.set_title(col.replace('_', ' '))
             ax.set_xlabel('')
             ax.tick_params(axis='x', rotation=30)
-
-        fig.suptitle('Section 10 – Attrition Persona Profiles', fontweight='bold', fontsize=13)
-        plt.savefig('s10_persona_profiles.png', bbox_inches='tight')
+        fig.suptitle(f'Section 10 – Persona Profiles ({name})', fontweight='bold', fontsize=13)
+        plt.savefig(f's10_persona_profiles_{slug(name)}.png', bbox_inches='tight')
         plt.show()
 
-    # Donut chart – persona share
+    # Donut of persona share
     fig, ax = plt.subplots(figsize=(7, 7))
     wedges, texts, autotexts = ax.pie(
-        persona_counts.values,
-        labels=persona_counts.index,
-        autopct='%1.1f%%',
-        startangle=90,
-        wedgeprops={'width': 0.55, 'edgecolor': 'white', 'linewidth': 2},
+        persona_counts.values, labels=persona_counts.index, autopct='%1.1f%%',
+        startangle=90, wedgeprops={'width': 0.55, 'edgecolor': 'white', 'linewidth': 2},
         colors=sns.color_palette('Set2', n_colors=len(persona_counts)),
     )
     for at in autotexts:
         at.set_fontweight('bold')
-    ax.set_title('Section 10 – Voluntary Attrition Personas', fontweight='bold')
-    plt.savefig('s10_persona_donut.png', bbox_inches='tight')
+    ax.set_title(f'Section 10 – Attrition Personas ({name})', fontweight='bold')
+    plt.savefig(f's10_persona_donut_{slug(name)}.png', bbox_inches='tight')
     plt.show()
 
-    # Harrods Band by Persona heatmap
-    if COL['harrods_band'] in vol.columns:
-        persona_band = pd.crosstab(vol['Persona'], vol[COL['harrods_band']])
-        fig, ax = plt.subplots(figsize=(10, 5))
-        sns.heatmap(persona_band, annot=True, fmt='d', cmap='Purples',
-                    linewidths=0.3, ax=ax)
-        ax.set_title('Personas by Harrods Band')
-        plt.savefig('s10_persona_band_heatmap.png', bbox_inches='tight')
-        plt.show()
+persona_analysis(COHORTS['Voluntary'],   'Voluntary',   PERSONA_MAP_VOL)
+persona_analysis(COHORTS['Involuntary'], 'Involuntary', PERSONA_MAP_INVOL)
 
 
 # =============================================================================
 # 11. STATISTICAL DRIVER ANALYSIS (Chi-Square + Cramér's V)
 # =============================================================================
+# Tests association of each categorical variable with the voluntary vs
+# involuntary split – inherently a "both cohorts" analysis.
 print('\n' + '='*65)
 print('SECTION 11 – STATISTICAL DRIVER ANALYSIS')
 print('='*65)
@@ -764,13 +787,12 @@ for var in cat_test_vars:
                         'Significant': 'Yes' if p < 0.05 else 'No'})
 
 chi_df = pd.DataFrame(chi_results).sort_values('Cramers_V', ascending=False)
-print('\nChi-Square Driver Analysis Results:')
+print('\nChi-Square Driver Analysis (Voluntary vs Involuntary):')
 print(chi_df.to_string(index=False))
 
 fig, ax = plt.subplots(figsize=(8, 4))
-bars = ax.barh(chi_df['Variable'], chi_df['Cramers_V'],
-               color=[BRAND_BLUE if s == 'Yes' else BRAND_ORANGE
-                      for s in chi_df['Significant']])
+ax.barh(chi_df['Variable'], chi_df['Cramers_V'],
+        color=[BRAND_BLUE if s == 'Yes' else BRAND_ORANGE for s in chi_df['Significant']])
 ax.axvline(0.1, color='gray', linestyle='--', linewidth=0.8, label='Small effect (0.1)')
 ax.axvline(0.3, color='gray', linestyle=':',  linewidth=0.8, label='Medium effect (0.3)')
 ax.set_title("Section 11 – Cramér's V Effect Size by Variable")
@@ -781,7 +803,7 @@ plt.show()
 
 
 # =============================================================================
-# 12. LOGISTIC REGRESSION
+# 12. LOGISTIC REGRESSION  (target: Is_Voluntary → contrasts both cohorts)
 # =============================================================================
 print('\n' + '='*65)
 print('SECTION 12 – LOGISTIC REGRESSION')
@@ -790,21 +812,17 @@ print('='*65)
 lr_num_cols = [c for c in [COL['age'], COL['tenure'],
                              COL['daily_salary'], COL['commute_km']]
                if c in turnover.columns]
-
 lr_cat_cols = [c for c in [COL['harrods_band']] if c in turnover.columns]
 
 lr_df = turnover[lr_num_cols + lr_cat_cols + ['Is_Voluntary']].dropna()
-
-# One-hot encode categorical predictors
 if lr_cat_cols:
     lr_df = pd.get_dummies(lr_df, columns=lr_cat_cols, drop_first=True)
 
 feature_cols = [c for c in lr_df.columns if c != 'Is_Voluntary']
-
 X = lr_df[feature_cols].astype(float)
 y = lr_df['Is_Voluntary']
 
-# ── 12a  Multicollinearity check (VIF) ───────────────────────────────────────
+# VIF
 X_vif = sm.add_constant(X)
 vif_data = pd.DataFrame({
     'Feature': X_vif.columns,
@@ -813,13 +831,13 @@ vif_data = pd.DataFrame({
 print('\nVariance Inflation Factors:')
 print(vif_data.to_string(index=False))
 
-# ── 12b  Fit model ───────────────────────────────────────────────────────────
+# Fit
 X_const = sm.add_constant(X)
 model = sm.Logit(y, X_const).fit(disp=False)
-print('\nLogistic Regression Summary:')
+print('\nLogistic Regression Summary (target = Is_Voluntary):')
 print(model.summary2())
 
-# ── 12c  Odds Ratios ──────────────────────────────────────────────────────────
+# Odds ratios
 odds_df = pd.DataFrame({
     'Feature'   : model.params.index,
     'Coef'      : model.params.values.round(4),
@@ -828,11 +846,10 @@ odds_df = pd.DataFrame({
     'CI_Lower'  : np.exp(model.conf_int()[0].values).round(4),
     'CI_Upper'  : np.exp(model.conf_int()[1].values).round(4),
 }).sort_values('Odds_Ratio', ascending=False)
-
-print('\nOdds Ratio Interpretation Table (for HR stakeholders):')
+print('\nOdds Ratio Interpretation Table (OR>1 => more likely VOLUNTARY):')
 print(odds_df.to_string(index=False))
 
-# Forest plot of odds ratios
+# Forest plot
 odds_plot = odds_df[odds_df['Feature'] != 'const'].copy()
 fig, ax = plt.subplots(figsize=(8, max(4, len(odds_plot) * 0.5)))
 y_pos = range(len(odds_plot))
@@ -850,7 +867,7 @@ plt.show()
 
 
 # =============================================================================
-# 13. CORRELATION ANALYSIS
+# 13. CORRELATION ANALYSIS  (all leavers + per cohort)
 # =============================================================================
 print('\n' + '='*65)
 print('SECTION 13 – CORRELATION ANALYSIS')
@@ -860,20 +877,20 @@ corr_cols = [c for c in [COL['age'], COL['tenure'], COL['daily_salary'],
                            COL['base_pay'], COL['commute_km']]
              if c in turnover.columns]
 
-corr_matrix = turnover[corr_cols].corr()
-print('\nCorrelation Matrix:')
-print(corr_matrix.round(3).to_string())
-
-fig, ax = plt.subplots(figsize=(8, 6))
-mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
-sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm',
-            vmin=-1, vmax=1, center=0,
-            linewidths=0.5, ax=ax, square=True,
-            cbar_kws={'label': 'Pearson r'},
-            xticklabels=[c.replace('_', ' ') for c in corr_cols],
-            yticklabels=[c.replace('_', ' ') for c in corr_cols])
-ax.set_title('Section 13 – Correlation Matrix (Numeric Variables)')
-plt.savefig('s13_correlation_heatmap.png', bbox_inches='tight')
+fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+for ax, (name, df) in zip(axes, COHORTS.items()):
+    corr_matrix = df[corr_cols].corr()
+    print(f'\n[{name}] Correlation matrix:')
+    print(corr_matrix.round(3).to_string())
+    sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm',
+                vmin=-1, vmax=1, center=0, linewidths=0.5, ax=ax, square=True,
+                cbar=False,
+                xticklabels=[c.replace('_', ' ') for c in corr_cols],
+                yticklabels=[c.replace('_', ' ') for c in corr_cols])
+    ax.set_title(f'{name}')
+fig.suptitle('Section 13 – Correlation Matrix (Numeric Variables)',
+             fontweight='bold', fontsize=14)
+plt.savefig('s13_correlation_heatmaps.png', bbox_inches='tight')
 plt.show()
 
 print("""
@@ -887,37 +904,30 @@ Interpretation note:
 
 
 # =============================================================================
-# 14. EXECUTIVE SUMMARY OUTPUT
+# 14. EXECUTIVE SUMMARY OUTPUT  (covers both cohorts)
 # =============================================================================
 print('\n' + '='*65)
 print('SECTION 14 – EXECUTIVE SUMMARY')
 print('='*65)
 
-# ── Auto-derive key facts ─────────────────────────────────────────────────────
-top3_reasons = (
-    vol[COL['reason']].value_counts().head(3).index.tolist()
-    if COL['reason'] in vol.columns else ['N/A']
-)
+def top_n_reasons(df, n=3):
+    if COL['reason'] in df.columns and len(df):
+        return df[COL['reason']].value_counts().head(n).index.tolist()
+    return ['N/A']
 
-top_area = (
-    vol[COL['area']].value_counts().idxmax()
-    if COL['area'] in vol.columns else 'N/A'
-)
+vol_reasons   = top_n_reasons(vol)
+invol_reasons = top_n_reasons(invol)
 
-top_division = (
-    vol[COL['division']].value_counts().idxmax()
-    if COL['division'] in vol.columns else 'N/A'
-)
+vol_area   = hotspots.get('Voluntary', {}).get(COL['area'], 'N/A')
+invol_area = hotspots.get('Involuntary', {}).get(COL['area'], 'N/A')
+vol_div    = hotspots.get('Voluntary', {}).get(COL['division'], 'N/A')
+invol_div  = hotspots.get('Involuntary', {}).get(COL['division'], 'N/A')
 
-early_pct_str = f'{pct_early:.1f}%' if 'pct_early' in dir() else 'N/A'
+vol_early_pct   = early_pct_by_cohort.get('Voluntary', float('nan'))
+invol_early_pct = early_pct_by_cohort.get('Involuntary', float('nan'))
 
-significant_drivers = (
-    chi_df[chi_df['Significant'] == 'Yes']['Variable'].tolist()
-    if 'chi_df' in dir() else []
-)
-
+significant_drivers = chi_df[chi_df['Significant'] == 'Yes']['Variable'].tolist()
 top_sig_driver = significant_drivers[0] if significant_drivers else 'N/A'
-
 try:
     top_lr_predictor = odds_plot.iloc[0]['Feature'].replace('_', ' ')
 except Exception:
@@ -925,7 +935,7 @@ except Exception:
 
 print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║            EMPLOYEE ATTRITION – EXECUTIVE SUMMARY           ║
+║            EMPLOYEE ATTRITION – EXECUTIVE SUMMARY            ║
 ╚══════════════════════════════════════════════════════════════╝
 
   HEADLINE METRICS
@@ -933,64 +943,46 @@ print(f"""
   • Total leavers         : {total:,}
   • Voluntary attrition   : {total_vol:,}  ({pct_vol:.1f}%)
   • Involuntary attrition : {total_invol:,}  ({pct_invol:.1f}%)
-  • Early leavers (<1yr)  : {len(early_vol):,}  ({early_pct_str} of voluntary exits)
+  • Early exits (<1yr)    : Voluntary {vol_early_pct:.1f}% | Involuntary {invol_early_pct:.1f}%
 
-  TOP 5 VOLUNTARY ATTRITION INSIGHTS
+  TOP INSIGHTS – VOLUNTARY
   ─────────────────────────────────────────────────────────────
-  1. The top voluntary off-board reasons are:
-     {', '.join(top3_reasons)}
-  2. Early leavers (< 1 year tenure) account for {early_pct_str}
-     of voluntary exits – a key retention risk.
-  3. The highest voluntary leaver concentration by Area is:
-     {top_area}
-  4. The highest voluntary leaver concentration by Division is:
-     {top_division}
-  5. The strongest statistical predictor of voluntary attrition
-     in the logistic regression is: {top_lr_predictor}
+  • Top reasons  : {', '.join(vol_reasons)}
+  • Top Area     : {vol_area}
+  • Top Division : {vol_div}
+  • {vol_early_pct:.1f}% of voluntary exits occur within the first year.
 
-  BIGGEST TENURE RISKS
+  TOP INSIGHTS – INVOLUNTARY
   ─────────────────────────────────────────────────────────────
-  • Employees leaving within their first year represent a
-    significant proportion of voluntary exits.
-  • Focus onboarding and early engagement interventions on
-    the 0–12 month window.
+  • Top reasons  : {', '.join(invol_reasons)}
+  • Top Area     : {invol_area}
+  • Top Division : {invol_div}
+  • {invol_early_pct:.1f}% of involuntary exits occur within the first year.
 
-  BIGGEST ORGANISATIONAL HOTSPOTS
+  SIGNIFICANT STATISTICAL FINDINGS (Voluntary vs Involuntary)
   ─────────────────────────────────────────────────────────────
-  • Area:     {top_area}
-  • Division: {top_division}
-  • Review management practices, workload, and culture signals
-    in these areas as a priority.
+  • Variables significantly associated with the exit type
+    (Chi-Square, p < 0.05):
+    {', '.join(significant_drivers) if significant_drivers else 'None significant'}
+  • Strongest categorical driver (Cramér's V): {top_sig_driver}
+  • Strongest regression predictor of voluntary exit: {top_lr_predictor}
 
-  MOST COMMON RESIGNATION REASONS
+  POTENTIAL RETENTION / WORKFORCE ACTIONS
   ─────────────────────────────────────────────────────────────
-  {chr(10).join(f'  • {r}' for r in top3_reasons)}
-
-  SIGNIFICANT STATISTICAL FINDINGS
-  ─────────────────────────────────────────────────────────────
-  • The following variables are significantly associated with
-    voluntary attrition (Chi-Square, p < 0.05):
-    {', '.join(significant_drivers) if significant_drivers else 'See Section 11'}
-  • Cramér's V identifies {top_sig_driver} as the
-    strongest categorical driver.
-
-  POTENTIAL RETENTION ACTIONS
-  ─────────────────────────────────────────────────────────────
-  1. Strengthen structured onboarding and 90-day check-ins
-     to reduce early leaver rates.
-  2. Review pay competitiveness, particularly in grades and
-     roles where pay-related exits are elevated.
-  3. Evaluate remote/hybrid working options for employees
-     with long commutes flagging commute as a factor.
-  4. Invest in career development pathways, especially for
-     high-risk tenure bands (0–3 years).
-  5. Conduct targeted stay interviews in hotspot Areas and
-     Divisions to surface localised engagement issues.
-  6. Monitor culture and working environment signals through
-     regular pulse surveys in high-exit Business Units.
+  1. Strengthen onboarding & 90-day check-ins to reduce early
+     voluntary exits.
+  2. Review pay competitiveness where pay-related resignations
+     cluster.
+  3. Offer hybrid/remote options for long-commute employees
+     citing commute or relocation.
+  4. Invest in career pathways for high-risk tenure bands.
+  5. Run stay interviews in voluntary hotspot Areas/Divisions.
+  6. For involuntary exits, review recruitment quality and
+     probation management in the hotspot areas identified above.
 
 ══════════════════════════════════════════════════════════════
   All charts saved as PNG files in the working directory.
+  Cohorts analysed: All Leavers, Voluntary, Involuntary.
   Analysis complete.
 ══════════════════════════════════════════════════════════════
 """)
