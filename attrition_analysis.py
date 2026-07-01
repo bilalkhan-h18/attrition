@@ -92,6 +92,8 @@ COL = {
     'age_band'         : 'Age_Band',
     'tenure'           : 'Tenure_Years',
     'tenure_band'      : 'Tenure_Band',
+    'tenure_sort'      : 'Tenure_Sort_Order',   # provided by source data – use for ordering, not text
+    'age_sort'         : 'Age_Sort_Order',      # provided by source data – use for ordering, not text
     'daily_salary'     : 'Daily_Salary',
     'base_pay'         : 'Total_Base_Pay__Amount',   # actual column name in Turnover sheet
     'commute_km'       : 'Commute_Km',
@@ -155,9 +157,37 @@ if COL['category'] in turnover.columns:
 else:
     raise KeyError(f"Column '{COL['category']}' not found – check sheet/column names.")
 
-# ── 1.7  Early-leaver flag ───────────────────────────────────────────────────
+# ── 1.7  Early-leaver flags ──────────────────────────────────────────────────
+# "Early leaver" is analysed at two thresholds: within 1 year and within 2 years.
+# EARLY_LEAVER_THRESHOLDS drives every downstream early-leaver section – add or
+# remove thresholds here and Section 5 will pick them up automatically.
+EARLY_LEAVER_THRESHOLDS = {
+    '<1 Year' : 1,
+    '<2 Years': 2,
+}
+
 if COL['tenure'] in turnover.columns:
-    turnover['Early_Leaver'] = (turnover[COL['tenure']] < 1).astype(int)
+    for label, cutoff in EARLY_LEAVER_THRESHOLDS.items():
+        flag_col = f'Early_Leaver_{cutoff}Y'
+        turnover[flag_col] = (turnover[COL['tenure']] < cutoff).astype(int)
+
+# ── 1.7b  Ordered tenure band list (uses the source Tenure_Sort_Order column) ─
+# Sorting by band TEXT is unreliable ("10-15 Years" would sort before "5+ Years"
+# alphabetically). The source data provides Tenure_Sort_Order for exactly this
+# purpose, so we derive the correct <1yr -> 15+yr ordering from it directly.
+TENURE_BAND_ORDER = []
+if COL['tenure_band'] in turnover.columns and COL['tenure_sort'] in turnover.columns:
+    TENURE_BAND_ORDER = (
+        turnover[[COL['tenure_band'], COL['tenure_sort']]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(COL['tenure_sort'])
+        [COL['tenure_band']]
+        .tolist()
+    )
+elif COL['tenure_band'] in turnover.columns:
+    # Fallback if Tenure_Sort_Order isn't present: alphabetical (not ideal)
+    TENURE_BAND_ORDER = sorted(turnover[COL['tenure_band']].dropna().unique().tolist())
 
 # ── 1.8  Define analysis cohorts ─────────────────────────────────────────────
 # Every deep-dive section runs across these three cohorts so that voluntary and
@@ -326,21 +356,16 @@ print('\n' + '='*65)
 print('SECTION 4 – TENURE ANALYSIS')
 print('='*65)
 
-TENURE_ORDER = ['<1 Year', '1-2 Years', '2-3 Years', '3-5 Years', '5+ Years']
-
 if COL['tenure_band'] in turnover.columns:
-    existing_bands = turnover[COL['tenure_band']].dropna().unique().tolist()
-    order = [b for b in TENURE_ORDER if b in existing_bands] + \
-            [b for b in existing_bands if b not in TENURE_ORDER]
-
     tenure_summary = (
         turnover.groupby([COL['tenure_band'], COL['category']])
                 .size()
                 .unstack(fill_value=0)
     )
-    if order:
+    # Order rows using Tenure_Sort_Order (<1yr first, 15+yr last) rather than text
+    if TENURE_BAND_ORDER:
         tenure_summary = tenure_summary.reindex(
-            [o for o in order if o in tenure_summary.index]
+            [b for b in TENURE_BAND_ORDER if b in tenure_summary.index]
         )
 
     avg_tenure_by_cat = turnover.groupby(COL['category'])[COL['tenure']].mean().round(2)
@@ -381,27 +406,44 @@ if COL['tenure_band'] in turnover.columns:
 # 5. EARLY LEAVER ANALYSIS  (Tenure < 1 Year)  — per cohort
 # =============================================================================
 print('\n' + '='*65)
-print('SECTION 5 – EARLY LEAVER ANALYSIS (Tenure < 1 Year)')
+print('SECTION 5 – EARLY LEAVER ANALYSIS (Tenure < 1 Year AND < 2 Years)')
 print('='*65)
+
+print("""
+  METHODOLOGY CAVEAT – point-in-time sampling bias
+  ─────────────────────────────────────────────────────────────
+  Headcount is a snapshot as at February; Turnover captures only
+  employees who were present in that Feb snapshot and have since left.
+  Anyone hired AFTER February who has already left is structurally
+  excluded from this dataset (they were never in the Feb headcount).
+  This UNDERSTATES early attrition, especially the '<1 Year' band,
+  because a whole slice of "hired fast, left fast" leavers never
+  enters the sample. Treat '<1 Year' / '<2 Years' figures below as a
+  FLOOR on early attrition, not the true rate. Do not merge in
+  post-Feb hire-and-leave records here – there is no matching
+  headcount denominator for them; if needed, report that as a
+  separate, clearly-labelled new-hire cohort metric instead.
+""")
 
 early_num_cols = [c for c in [COL['age'], COL['daily_salary'], COL['commute_km']]
                   if c in turnover.columns]
 
-# Track early-leaver % per cohort for the executive summary
-early_pct_by_cohort = {}
+# Track early-leaver % per cohort per threshold for the executive summary
+early_pct_by_cohort = {}   # {(cohort_name, threshold_label): pct}
 
-def early_leaver_analysis(df, name):
-    """Compare early vs non-early leavers within a single cohort."""
-    if len(df) == 0:
+def early_leaver_analysis(df, name, threshold_label, flag_col):
+    """Compare early vs non-early leavers within a single cohort at one threshold."""
+    if len(df) == 0 or flag_col not in df.columns:
         return
     df = df.copy()
-    early     = df[df['Early_Leaver'] == 1]
+    early     = df[df[flag_col] == 1]
     pct_early = len(early) / len(df) * 100
-    early_pct_by_cohort[name] = pct_early
-    print(f'\n[{name}] Early leavers (<1yr): {len(early):,} ({pct_early:.1f}% of {name.lower()} exits)')
+    early_pct_by_cohort[(name, threshold_label)] = pct_early
+    print(f'\n[{name} | {threshold_label}] Early leavers: {len(early):,} '
+          f'({pct_early:.1f}% of {name.lower()} exits)')
 
     # Boxplot: early vs non-early on key numerics
-    df['Early_Label'] = df['Early_Leaver'].map({1: 'Early (<1yr)', 0: 'Non-Early'})
+    df['Early_Label'] = df[flag_col].map({1: f'Early ({threshold_label})', 0: 'Non-Early'})
     fig, axes = plt.subplots(1, len(early_num_cols), figsize=(4 * len(early_num_cols), 5))
     if len(early_num_cols) == 1:
         axes = [axes]
@@ -410,26 +452,28 @@ def early_leaver_analysis(df, name):
                     palette=[BRAND_ORANGE, BRAND_BLUE], fliersize=3)
         ax.set_title(col.replace('_', ' '))
         ax.set_xlabel('')
-    fig.suptitle(f'Section 5 – Early vs Non-Early Leavers ({name})',
+    fig.suptitle(f'Section 5 – Early vs Non-Early Leavers ({name}, {threshold_label})',
                  fontweight='bold', fontsize=13)
-    plt.savefig(f's5_early_leavers_{slug(name)}.png', bbox_inches='tight')
+    plt.savefig(f's5_early_leavers_{slug(name)}_{threshold_label.strip("<> ").replace(" ", "")}.png',
+                bbox_inches='tight')
     plt.show()
 
     # Top reasons among early leavers
     if COL['reason'] in early.columns and len(early) > 0:
         early_reasons = early[COL['reason']].value_counts().head(10)
-        print(f'[{name}] Top reasons among early leavers:')
+        print(f'[{name} | {threshold_label}] Top reasons among early leavers:')
         print(early_reasons.to_string())
 
     # Early-leaver rate by Area and Harrods Band
     for var, label in [(COL['area'], 'Area'), (COL['harrods_band'], 'Harrods Band')]:
         if var in df.columns:
-            rate = df.groupby(var)['Early_Leaver'].mean().mul(100).round(1)
-            print(f'[{name}] Early leaver % by {label}:')
+            rate = df.groupby(var)[flag_col].mean().mul(100).round(1)
+            print(f'[{name} | {threshold_label}] Early leaver % by {label}:')
             print(rate.sort_values(ascending=False).head(10).to_string())
 
 for name, df in COHORTS.items():
-    early_leaver_analysis(df, name)
+    for threshold_label, cutoff in EARLY_LEAVER_THRESHOLDS.items():
+        early_leaver_analysis(df, name, threshold_label, f'Early_Leaver_{cutoff}Y')
 
 
 # =============================================================================
@@ -923,8 +967,10 @@ invol_area = hotspots.get('Involuntary', {}).get(COL['area'], 'N/A')
 vol_div    = hotspots.get('Voluntary', {}).get(COL['division'], 'N/A')
 invol_div  = hotspots.get('Involuntary', {}).get(COL['division'], 'N/A')
 
-vol_early_pct   = early_pct_by_cohort.get('Voluntary', float('nan'))
-invol_early_pct = early_pct_by_cohort.get('Involuntary', float('nan'))
+vol_early_pct_1y   = early_pct_by_cohort.get(('Voluntary', '<1 Year'), float('nan'))
+vol_early_pct_2y   = early_pct_by_cohort.get(('Voluntary', '<2 Years'), float('nan'))
+invol_early_pct_1y = early_pct_by_cohort.get(('Involuntary', '<1 Year'), float('nan'))
+invol_early_pct_2y = early_pct_by_cohort.get(('Involuntary', '<2 Years'), float('nan'))
 
 significant_drivers = chi_df[chi_df['Significant'] == 'Yes']['Variable'].tolist()
 top_sig_driver = significant_drivers[0] if significant_drivers else 'N/A'
@@ -943,21 +989,26 @@ print(f"""
   • Total leavers         : {total:,}
   • Voluntary attrition   : {total_vol:,}  ({pct_vol:.1f}%)
   • Involuntary attrition : {total_invol:,}  ({pct_invol:.1f}%)
-  • Early exits (<1yr)    : Voluntary {vol_early_pct:.1f}% | Involuntary {invol_early_pct:.1f}%
+  • Early exits (<1yr)    : Voluntary {vol_early_pct_1y:.1f}% | Involuntary {invol_early_pct_1y:.1f}%
+  • Early exits (<2yrs)   : Voluntary {vol_early_pct_2y:.1f}% | Involuntary {invol_early_pct_2y:.1f}%
+    (NOTE: these are a floor, not a true rate — see Section 5 caveat on
+     point-in-time sampling bias re: post-Feb hires who already left)
 
   TOP INSIGHTS – VOLUNTARY
   ─────────────────────────────────────────────────────────────
   • Top reasons  : {', '.join(vol_reasons)}
   • Top Area     : {vol_area}
   • Top Division : {vol_div}
-  • {vol_early_pct:.1f}% of voluntary exits occur within the first year.
+  • {vol_early_pct_1y:.1f}% of voluntary exits occur within the first year;
+    {vol_early_pct_2y:.1f}% within the first two years.
 
   TOP INSIGHTS – INVOLUNTARY
   ─────────────────────────────────────────────────────────────
   • Top reasons  : {', '.join(invol_reasons)}
   • Top Area     : {invol_area}
   • Top Division : {invol_div}
-  • {invol_early_pct:.1f}% of involuntary exits occur within the first year.
+  • {invol_early_pct_1y:.1f}% of involuntary exits occur within the first year;
+    {invol_early_pct_2y:.1f}% within the first two years.
 
   SIGNIFICANT STATISTICAL FINDINGS (Voluntary vs Involuntary)
   ─────────────────────────────────────────────────────────────
